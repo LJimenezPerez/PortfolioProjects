@@ -12,7 +12,6 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-tinytex::install_tinytex()
 library(tidyverse)
 library(conflicted)
 library(scales)
