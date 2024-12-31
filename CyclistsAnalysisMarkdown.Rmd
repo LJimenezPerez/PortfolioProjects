@@ -1,0 +1,222 @@
+---
+title: |
+  </div>
+  <div style="text-align: center;">
+    ![](CyclisticLogo.jpg){width=2.5in}
+author: '<span style="font-size: 24px;">Luis Jimenez</span>'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+tinytex::install_tinytex()
+library(tidyverse)
+library(conflicted)
+library(scales)
+library(tinytex)
+
+
+# Set dplyr::filter and dplyr::lag as the default choices
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+
+# # Upload 2019 Q1 and 2020 Q1 datasets:
+q1_2019 <- read_csv("2019-Q1.csv")
+q1_2020 <- read_csv("2020-Q1.csv")
+
+# Compare column names each of the files
+colnames(q1_2019)
+colnames(q1_2020)
+
+# Rename columns to match both files
+
+(q1_2019 <- rename(q1_2019
+                   ,ride_id = trip_id
+                   ,rideable_type = bikeid
+                   ,started_at = start_time
+                   ,ended_at = end_time
+                   ,start_station_name = from_station_name
+                   ,start_station_id = from_station_id
+                   ,end_station_name = to_station_name
+                   ,end_station_id = to_station_id
+                   ,member_casual = usertype
+))
+
+# Inspect the dataframes and look for incongruencies
+
+str(q1_2019)
+str(q1_2020)
+
+# Convert ride_id and rideable_type to character so that they can stack correctly
+q1_2019 <-  mutate(q1_2019, ride_id = as.character(ride_id)
+                   ,rideable_type = as.character(rideable_type)) 
+
+# Stack individual quarter's data frames into one big data frame
+all_trips <- bind_rows(q1_2019, q1_2020)#, q3_2019)#, q4_2019, q1_2020)
+
+# Remove lat, long, birthyear, and gender fields as this data was dropped beginning in 2020
+all_trips <- all_trips %>%  
+  select(-c(start_lat, start_lng, end_lat, end_lng, birthyear, gender,  "tripduration"))
+
+# In the "member_casual" column, replace "Subscriber" with "member" and "Customer" with "casual"
+
+table(all_trips$member_casual)
+
+# Reassign to the desired values
+all_trips <-  all_trips %>% 
+  mutate(member_casual = recode(member_casual
+                                ,"Subscriber" = "member"
+                                ,"Customer" = "casual"))
+
+# Check to make sure the proper number of observations were reassigned
+table(all_trips$member_casual)
+
+# Add columns that list the date, month, day, and year of each ride
+
+all_trips$date <- as.Date(all_trips$started_at)
+all_trips$month <- format(as.Date(all_trips$date), "%m")
+all_trips$day <- format(as.Date(all_trips$date), "%d")
+all_trips$year <- format(as.Date(all_trips$date), "%Y")
+all_trips$day_of_week <- format(as.Date(all_trips$date), "%A")
+
+#Format the 'ended_at' column to the correct format
+
+all_trips$ended_at <- format(as.POSIXct(all_trips$ended_at, format = "%d/%m/%Y %H:%M"), "%Y-%m-%d %H:%M:%S")
+all_trips$started_at <- format(as.POSIXct(all_trips$started_at, format = "%d/%m/%Y %H:%M"), "%Y-%m-%d %H:%M:%S")
+
+# Add a "ride_length" calculation to all_trips (in seconds)
+
+all_trips$ride_length <- difftime(all_trips$ended_at,all_trips$started_at)
+
+# Inspect the structure of the columns
+str(all_trips)
+
+# Convert "ride_length" from Factor to numeric so we can run calculations on the data
+is.factor(all_trips$ride_length)
+all_trips$ride_length <- as.numeric(as.character(all_trips$ride_length))
+is.numeric(all_trips$ride_length)
+
+# Remove "bad" data
+# The dataframe includes a few hundred entries when bikes were taken out of docks and checked for quality by Divvy or ride_length was negative
+
+all_trips_v2 <- all_trips[!(all_trips$start_station_name == "HQ QR" | all_trips$ride_length<0),]
+
+# Replace member to annual riders
+
+all_trips_v2 <- all_trips_v2 %>%
+  mutate(member_casual = case_when(
+    member_casual == "member" ~ "Annual", 
+    member_casual == "casual" ~ "Casual",
+    member_casual == "Customer" ~ "Casual",
+    member_casual == "Subscriber" ~ "Annual",
+    member_casual == "annual" ~ "Annual",
+    TRUE ~ member_casual
+  ))
+
+# Calculate the mean of ride_length and convert it to hh:mm:ss format
+mean_ride_length <- aggregate(ride_length ~ member_casual, data = all_trips_v2, FUN = mean)
+
+# Convert the mean ride length (in seconds) to hh:mm:ss format
+mean_ride_length$Ride_Length_Average <- format(as.POSIXct(mean_ride_length$ride_length, origin = "1970-01-01", tz = "UTC"), "%H:%M:%S")
+
+# Rename 'member_casual' to 'Member_Type'
+colnames(mean_ride_length)[colnames(mean_ride_length) == "member_casual"] <- "Member_Type"
+
+# Select only 'Member_Type' and 'Ride_Length_Average' columns to display
+mean_ride_length <- mean_ride_length[, c("Member_Type", "Ride_Length_Average")]
+
+# Average Duration by Day of Week plot
+avg_duration_dow <- all_trips_v2 %>% 
+  filter(!is.na(day_of_week)) %>%  # Exclude rows where day_of_week is NA
+  mutate(weekday = wday(started_at, label = TRUE)) %>% 
+  group_by(member_casual, weekday) %>% 
+  summarise(
+    number_of_rides = n(),
+    average_duration = mean(ride_length)
+  ) %>% 
+  arrange(member_casual, weekday) %>% 
+  ggplot(aes(x = weekday, y = average_duration, fill = member_casual)) +
+  geom_col(position = "dodge") +
+  labs(title = "Average Duration by Day of Week", x = "Day of Week", y = "Average Duration (m)") +
+  scale_y_continuous(labels = function(x) sprintf("%02d:%02d", floor(x / 3600), floor((x %% 3600) / 60))) +  # Format y-axis as HH:MM
+  guides(fill = guide_legend(title = "Member Type")) +
+  scale_fill_manual(values = c("Annual" = "skyblue", "Casual" = "sienna"))
+
+# Average Rides by Day of Week plot
+avg_rides_dow <- all_trips_v2 %>%
+  filter(!is.na(member_casual)) %>%  # Exclude rows where member_casual is NA
+  mutate(weekday = wday(started_at, label = TRUE)) %>% 
+  group_by(member_casual, weekday) %>% 
+  summarise(
+    number_of_rides = n(),
+    average_duration = mean(ride_length)
+  ) %>% 
+  arrange(member_casual, weekday) %>% 
+  ggplot(aes(x = weekday, y = number_of_rides, fill = member_casual)) +
+  geom_col(position = "dodge") +
+  guides(fill = guide_legend(title = "Member Type")) +
+  labs(title = "Average Rides by Member", x="Day of Week", y="Number of Rides") +
+  scale_y_continuous(labels = label_comma()) +
+  scale_fill_manual(values = c("Annual" = "skyblue", "Casual" = "sienna"))
+
+```
+
+## Introduction
+
+As a Junior Data Analyst on the Marketing Analyst team at Cyclistic, I have conducted an analysis of how casual riders and annual members utilize the Cyclistic bike-share system. The objective of this analysis was to gain a deeper understanding of the behavioral differences between these two groups, with the ultimate goal of informing strategies to increase the number of annual memberships.
+
+Through this analysis, I have identified key patterns in the ways these riders engage with the bike-share system, specifically focusing on the frequency of rides taken and the average duration of rides across different weekdays. These insights will be instrumental in shaping a targeted marketing strategy designed to convert casual riders into annual members:
+
+* Average time spent by Casual riders compared to Annual riders
+* Average time spent by Casual and Annual riders by the day of the week
+* Average rides by Casual and Annual riders by the day of the week
+
+## Average duration on Rides
+
+First, we need to look at the average time the 2 types of members have:
+
+```{r Average ride length by member, fig.align='center', echo=FALSE}
+colnames(mean_ride_length) <- c("Member Type", "Ride Length Average")
+knitr::kable(mean_ride_length)
+```
+
+This will show that Annual riders ride an average of 1.13 minutes compared to Casual riders that will be more than 10 times the average of Annual riders. This is important to know, but to have a more clear picture, let's look at how that will spread throughout the week:
+
+### Average duration by Day of Week
+
+
+```{r Average ride length by day of week, fig.align='center', echo=FALSE}
+plot(avg_duration_dow)
+```
+
+Looking at this graph, we can see that how Tuesday and Saturday were the highest average duration for Casual riders, different from Annual riders, where it was fairly consistent throughout the week. These differences raises some questions:
+
+* Should we focus on attracting more Casual riders?
+* Should we aim to rely on Casual riders to scale profitability?
+* Should we create incentives to have Annual riders invite friends with a discount promotion to increase both Annual and Casual rides?
+
+## Average Rides by Day of Week
+
+
+```{r Average rides by day of week, fig.align='center', echo=FALSE}
+plot(avg_rides_dow)
+```
+
+This visualization provides an additional perspective on the case and, in my assessment, presents significant opportunities for shareholders to consider. When comparing the number of rides taken by each member group, it becomes evident that Annual riders utilize the bikes at a far greater frequency, despite their rides being shorter in duration. This trend underscores the potential value of fostering greater engagement among Casual riders to increase overall usage.
+
+## Conclusion
+
+Based on the analysis of Casual and Annual riders’ behaviors, it is clear that Annual riders are significantly more frequent users of the Cyclistic bike-share system, despite taking shorter rides on average. Casual riders, on the other hand, tend to take longer rides, but their frequency of use is considerably lower. This presents a key opportunity for Cyclistic to design targeted strategies aimed at converting more Casual riders into Annual members.
+
+Creating incentives for Casual riders to become Annual members is essential for boosting long-term profitability and enhancing customer loyalty. Given that Annual riders engage with the system more frequently, a shift from Casual to Annual membership could result in a more consistent revenue stream.
+
+To achieve this, Cyclistic could introduce marketing strategies such as:
+
+* Offering discounts for Casual riders who upgrade to Annual memberships
+* Providing referral programs where Annual members can invite friends to try out the service at a discounted rate
+
+By aligning the interests of both Casual and Annual riders, Cyclistic can cultivate a more robust and engaged customer base, thereby driving increased usage of the bikes throughout the year. These strategies will not only help retain current Annual riders but also incentivize existing members to convert Casual riders into Annual members. As a result, this approach will lead to a more consistent and predictable revenue stream, ultimately boosting profitability by increasing membership subscriptions and encouraging higher utilization of the bike-share system.
+
